@@ -1,0 +1,21 @@
+{
+  "name": "opencode-codex-auto-review",
+  "version": "0.1.0",
+  "description": "OpenCode V2 permission reviewer using Codex Auto Review when available",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./server": "./src/index.js"
+  },
+  "files": ["index.js", "src", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check index.js && node --check src/index.js && node --check src/diagnostics.js && node --check src/model-registration.js && node --check src/review.js && node --check src/review-protocol.js && node --check src/semaphore.js"
+  },
+  "dependencies": {
+    "@opencode/schema": "~2.0.24"
+  }
+}
