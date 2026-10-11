@@ -9,7 +9,8 @@ The reviewer receives no tools and cannot execute the requested action. The plug
 - **Compaction context:** uses a valid completed checkpoint when raw user turns are unavailable. Summary-only context is restricted to low-risk approvals.
 - **Approval profiles:** five profiles define which risk and authorization combinations can be allowed.
 - **Unresolved-ask fallback:** independently leaves unresolved asks pending or denies them for unattended workflows, subject to reviewer-availability exceptions.
-- **Bounded review:** limits context, resources, and prompt size. Diagnostics exclude credentials, prompts, resources, and model rationale.
+- **Bounded review:** limits context, resources, and prompt size. Diagnostics exclude credentials, prompts, resources, custom-policy text, and model rationale.
+- **Custom reviewer policies:** combines always-applicable user rules with project-scoped rules, while preserving built-in review limits and approval profiles.
 
 ## How a review works
 
@@ -24,13 +25,13 @@ The plugin reviews only tool-originated asks. Other permission sources are left 
 
 The plugin uses OpenCode’s structured session message types; it does not search ordinary conversation text for something that merely looks like a summary. A compaction checkpoint is accepted only when it is the latest checkpoint in the supplied context, has `type: "compaction"` and `status: "completed"`, contains a non-empty `summary`, and has a string `recent` field.
 
-- Up to 16 direct user text messages are accepted, within a combined 12,000-character context budget. Exceeding the count or budget makes the context incomplete rather than silently dropping older user intent.
+- Up to 256 direct user text messages are accepted, within a combined 200,000-character context budget (roughly 50,000 tokens for typical English; actual token counts vary). Exceeding the count or budget makes the context incomplete rather than silently dropping older user intent.
 - The latest completed checkpoint contributes its `summary` and `recent` fields. If it is the only available context, the reviewer cannot infer high authorization, and the code permits only low-risk approvals in every profile.
 - Assistant and tool messages are not treated as direct user authorization. A compaction summary is lossy background, not a verbatim user instruction.
-- File attachments and `files` metadata are ignored; neither attachment content nor file metadata is sent to the reviewer. Non-empty `agents` or `skills` metadata makes the context incomplete. A missing, running, failed, empty, malformed, or over-budget latest checkpoint is not used.
-- Permission actions are limited to 128 characters; resources are limited to 32 entries, 4,000 characters per entry, and 24 KiB total UTF-8. The complete review prompt is capped at 48 KiB.
+- File attachments and `files` metadata are ignored; neither attachment content nor file metadata is sent to the reviewer. Non-empty `agents` or `skills` metadata makes the context incomplete. Missing, running, failed, or empty checkpoints are not used; oversized context is sent as a bounded excerpt marked incomplete.
+- Permission actions are limited to 128 characters; resources are limited to 128 entries, 16,000 characters per entry, and 256 KiB total UTF-8. The complete generated review prompt is capped at 1 MiB.
 
-Incomplete context does not produce a model approval. Its disposition follows the fallback policy, described below.
+The reviewer is still called when context is incomplete. It receives the bounded available text (if any) and an explicit `context_complete: false` marker, so it can assess the permission request without mistaking omitted history for authorization. Its assessment still goes through the configured approval profile and unresolved-request fallback.
 
 ## Approval profiles
 
@@ -53,9 +54,9 @@ Set `OPENCODE_CODEX_AUTO_REVIEW_FALLBACK` in the OpenCode server’s environment
 | Value | Behavior |
 |---|---|
 | `ask` *(default)* | Leave unresolved tool asks pending for a person. |
-| `deny` | Deny tool asks that are not allowed, including threshold misses and plugin-side context or validation failures. No reviewer call is needed to deny an ineligible tool ask. |
+| `deny` | Deny unresolved tool asks, including threshold misses and plugin-side failures. Reviewer unavailability remains `ask`; incomplete context is reviewed by the model first. |
 
-Non-tool permission asks are unchanged. Reviewer unavailability is a deliberate exception: a missing/ineligible ChatGPT connection, a changed connection, a failed or timed-out generation call, or an unusable assessment stays `ask` even when the fallback is `deny`.
+Non-tool permission asks are unchanged. Incomplete context is sent to the reviewer with a completeness marker, and the model's resulting assessment is applied normally. Reviewer unavailability (a missing/ineligible ChatGPT connection, a changed connection, a failed or timed-out generation call, or an unusable assessment) stays `ask` even when the fallback is `deny`.
 
 For example, this allows balanced approvals, denies other unresolved tool asks, and still asks a person if the reviewer cannot give a usable answer:
 
@@ -64,6 +65,19 @@ export OPENCODE_CODEX_AUTO_REVIEW_MODE=balanced
 export OPENCODE_CODEX_AUTO_REVIEW_FALLBACK=deny
 opencode
 ```
+
+## Custom review policies
+
+Add reviewer instructions in either or both of these Markdown files:
+
+- **Always / user-wide:** `$XDG_CONFIG_HOME/opencode/codex-auto-review.md`; when `XDG_CONFIG_HOME` is unset or relative, `~/.config/opencode/codex-auto-review.md` is used.
+- **Project-level:** `<project-root>/.opencode/codex-auto-review.md`. Only the current project root is checked; parent directories and `AGENTS.md` are not loaded as review policy.
+
+Both files are read for each review and sent to the reviewer. The global policy takes precedence over project policy; project rules cannot weaken global or built-in constraints. Policy text does not count as evidence that the current user authorized an action, and ambiguity or conflict should result in `ask`.
+
+Each file is limited to 4,000 characters (8,000 combined). Files must be regular files inside their owning roots; symlinks are rejected. Missing files are ignored. An unreadable, oversized, or out-of-scope policy makes the review unresolved and follows the configured fallback without calling the model.
+
+These are model-facing instructions, not a deterministic permission ACL. Project rules are repository content and should be reviewed before trusting them. Policy contents are sent to OpenAI with the review request; do not put secrets in them. Use OpenCode sandbox and permission rules for boundaries that must be enforced independently of the model.
 
 ## Install and configure
 
@@ -95,7 +109,7 @@ Log in to OpenCode with a supported ChatGPT OAuth connection before starting or 
 
 ## Diagnostics and development
 
-Sanitized JSONL diagnostics are written to `~/.local/share/opencode/log/codex-auto-review.ndjson`, or `$XDG_DATA_HOME/opencode/log/codex-auto-review.ndjson`. Records include decision categories, timings, context sizes, and byte counts, but exclude resource values, session IDs, prompt text, credentials, provider error messages, and model rationale. Override the path with `OPENCODE_CODEX_AUTO_REVIEW_LOG`.
+Sanitized JSONL diagnostics are written to `~/.local/share/opencode/log/codex-auto-review.ndjson`, or `$XDG_DATA_HOME/opencode/log/codex-auto-review.ndjson`. Records include decision categories, timings, context sizes, context-validation failure categories, policy presence/lengths, and byte counts, but exclude resource values, session IDs, policy text, prompt text, credentials, provider error messages, and model rationale. Override the path with `OPENCODE_CODEX_AUTO_REVIEW_LOG`.
 
 ```sh
 npm install
@@ -104,7 +118,7 @@ npm run check
 npm pack
 ```
 
-The tests cover provider-route-aware model registration, permission filtering, compaction context, profile and fallback decisions, OAuth eligibility, connection changes, bounded concurrency, timeout/cancellation handling, diagnostics redaction, and malformed assessments. The assessment shape is based on public Codex sources; no Codex implementation code is copied.
+The tests cover provider-route-aware model registration, permission filtering, compaction context and budget limits, custom-policy loading and scope, profile and fallback decisions, OAuth eligibility, connection changes, bounded concurrency, timeout/cancellation handling, diagnostics redaction, and malformed assessments. The assessment shape is based on public Codex sources; no Codex implementation code is copied.
 
 ## Sources and license
 

@@ -39,12 +39,14 @@ test("review logger writes JSONL metadata without request contents", async () =>
       action: "shell",
       phase: "session.context",
       reasonCode: "permission_not_ask",
+      contextFailureCode: "context_budget_exceeded",
       decisionFallback: "deny",
       resourceChars: canary.length,
       resources: [canary],
       sessionID: canary,
       prompt: canary,
       providerError: canary,
+      invalidContextFailureCode: canary,
     });
     await flushReviewLogs();
     const records = (await readFile(filePath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
@@ -54,9 +56,41 @@ test("review logger writes JSONL metadata without request contents", async () =>
     assert.equal(records[0].event, "permission-hook.received");
     assert.equal(records[0].reviewID, reviewID);
     assert.equal(records[0].reasonCode, "permission_not_ask");
+    assert.equal(records[0].contextFailureCode, "context_budget_exceeded");
+    assert.equal(records[0].invalidContextFailureCode, undefined);
     assert.equal(records[0].decisionFallback, "deny");
     assert.equal(records[0].resourceChars, canary.length);
     assert.equal(JSON.stringify(records[0]).includes(canary), false);
+  } finally {
+    await flushReviewLogs();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("custom policy diagnostics retain scope and size but not instruction text", async () => {
+  const secretRule = "SYNTHETIC_CUSTOM_POLICY_PRIVATE_CANARY";
+  const directory = await mkdtemp(join("/tmp/opencode", "codex-auto-review-policy-logger-test-"));
+  const filePath = join(directory, "review.ndjson");
+  try {
+    const log = createReviewLogger({ filePath });
+    log("custom-policy.summary", {
+      globalPolicyLoaded: true,
+      projectPolicyLoaded: true,
+      globalPolicyChars: 17,
+      projectPolicyChars: 19,
+      customPolicyChars: 36,
+      instructions: secretRule,
+    });
+    await flushReviewLogs();
+    const record = JSON.parse((await readFile(filePath, "utf8")).trim());
+
+    assert.equal(record.event, "custom-policy.summary");
+    assert.equal(record.globalPolicyLoaded, true);
+    assert.equal(record.projectPolicyLoaded, true);
+    assert.equal(record.globalPolicyChars, 17);
+    assert.equal(record.projectPolicyChars, 19);
+    assert.equal(record.customPolicyChars, 36);
+    assert.equal(JSON.stringify(record).includes(secretRule), false);
   } finally {
     await flushReviewLogs();
     await rm(directory, { recursive: true, force: true });

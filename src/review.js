@@ -11,6 +11,7 @@ import {
   shouldReviewPermission,
 } from "./review-protocol.js";
 import { createSemaphore } from "./semaphore.js";
+import { loadCustomInstructions } from "./custom-instructions.js";
 import {
   createReviewID,
   elapsedMs,
@@ -124,19 +125,20 @@ export async function reviewPermission(ctx, event, options = {}) {
       queuedReviews: reviewSemaphore.queuedCount,
     });
 
-    const [session, connection] = await Promise.all([
+    const [sessionResult, connection] = await Promise.all([
       runPhase("session.context", () => raceWithAbort(
         Promise.resolve().then(() => ctx.session.context(
           { sessionID: event.sessionID },
           { signal: controller.signal },
         )),
         controller.signal,
-      )),
+      )).then((value) => ({ value }), (error) => ({ error })),
       runPhase("integration.connection.active", () => raceWithAbort(
         Promise.resolve().then(() => ctx.integration.connection.active(OPENAI_PROVIDER_ID)),
         controller.signal,
       )),
     ]);
+    const session = sessionResult.value;
     log("session.context.summary", {
       reviewID,
       ...summarizeSessionContext(session),
@@ -154,17 +156,27 @@ export async function reviewPermission(ctx, event, options = {}) {
         : 0,
       truncated: authorization.truncated,
       compacted: authorization.compacted,
+      contextFailureCode: authorization.failureCode,
     });
-    if (authorization.truncated ||
-        (authorization.messages.length === 0 && !authorization.compactionSummary)) {
-      handleUnresolvedPermission(event, "context_incomplete", reviewID, startedAt, undefined, log, undefined, decisionFallback, currentPhase);
-      return;
-    }
-
     if (!connection) {
       handleUnresolvedPermission(event, "connection_inactive", reviewID, startedAt, undefined, log, undefined, decisionFallback, currentPhase);
       return;
     }
+
+    const customInstructions = await runPhase("policy.load", () => raceWithAbort(
+      Promise.resolve().then(() => loadCustomInstructions({
+        projectDirectory: ctx.location?.project?.directory,
+      })),
+      controller.signal,
+    ));
+    log("custom-policy.summary", {
+      reviewID,
+      globalPolicyLoaded: Boolean(customInstructions.global),
+      projectPolicyLoaded: Boolean(customInstructions.project),
+      globalPolicyChars: customInstructions.global.length,
+      projectPolicyChars: customInstructions.project.length,
+      customPolicyChars: customInstructions.global.length + customInstructions.project.length,
+    });
 
     const promptStartedAt = performance.now();
     const [prompt, credential] = await Promise.all([
@@ -174,6 +186,8 @@ export async function reviewPermission(ctx, event, options = {}) {
         userInstructions: authorization.messages,
         compactionSummary: authorization.compactionSummary,
         approvalMode,
+        customInstructions,
+        contextIncomplete: authorization.truncated,
       })),
       runPhase("integration.connection.resolve", () => raceWithAbort(
         Promise.resolve().then(() => ctx.integration.connection.resolve(connection)),
@@ -262,7 +276,17 @@ export async function reviewPermission(ctx, event, options = {}) {
       log("decision.applied", { reviewID, effect: "deny", approvalMode, decisionFallback, durationMs: elapsedMs(startedAt) });
       return;
     }
-    handleUnresolvedPermission(event, "assessment_uncertain", reviewID, startedAt, assessment.risk_level, log, approvalMode, decisionFallback, currentPhase);
+    handleUnresolvedPermission(
+      event,
+      authorization.truncated ? "context_incomplete" : "assessment_uncertain",
+      reviewID,
+      startedAt,
+      assessment.risk_level,
+      log,
+      approvalMode,
+      decisionFallback,
+      currentPhase,
+    );
   } catch (error) {
     // Do not log provider messages, stack traces, prompts, resource values, or credentials.
     log("review.failed", {
@@ -277,7 +301,9 @@ export async function reviewPermission(ctx, event, options = {}) {
       ? "timeout"
       : externalSignal?.aborted
         ? "cancelled"
-        : "review_failed";
+        : currentPhase === "policy.load"
+          ? "policy_unavailable"
+          : "review_failed";
     if (!controller.signal.aborted) controller.abort();
     handleUnresolvedPermission(event, failureCode, reviewID, startedAt, undefined, log, undefined, decisionFallback, currentPhase);
   } finally {
@@ -342,6 +368,9 @@ function handleUnresolvedPermission(event, reasonCode, reviewID, startedAt, risk
       break;
     case "credential_ineligible":
       reasonText = "a valid ChatGPT-plan OAuth credential is unavailable";
+      break;
+    case "policy_unavailable":
+      reasonText = "the configured custom reviewer policies could not be loaded safely";
       break;
     case "assessment_invalid":
       reasonText = "the reviewer did not return a complete valid assessment";

@@ -13,7 +13,7 @@
   "files": ["index.js", "src", "README.md", "LICENSE"],
   "scripts": {
     "test": "node --test",
-    "check": "node --check index.js && node --check src/index.js && node --check src/diagnostics.js && node --check src/model-registration.js && node --check src/review.js && node --check src/review-protocol.js && node --check src/semaphore.js"
+    "check": "node --check index.js && node --check src/index.js && node --check src/custom-instructions.js && node --check src/diagnostics.js && node --check src/model-registration.js && node --check src/review.js && node --check src/review-protocol.js && node --check src/semaphore.js"
   },
   "dependencies": {
     "@opencode/schema": "~2.0.24"
