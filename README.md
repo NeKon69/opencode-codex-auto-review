@@ -1,12 +1,12 @@
 # OpenCode Codex Auto Review
 
-A plugin for OpenCode V2 that reviews eligible pending tool-permission asks using Codex Auto Review. When earlier turns have been compacted, it can use OpenCode’s completed compaction checkpoint—the `summary` and `recent` fields—instead of requiring the original user messages to still be present.
+A plugin for OpenCode V2 that reviews eligible pending tool-permission asks using Codex Auto Review. Direct user text is saved in durable plugin storage so it can be restored after compaction; a completed checkpoint's `summary` and `recent` fields remain supplementary, lossy background.
 
 The reviewer receives no tools and cannot execute the requested action. The plugin validates its JSON assessment, applies a configurable approval profile, and returns a permission decision to OpenCode.
 
 ## Features
 
-- **Compaction context:** uses a valid completed checkpoint when raw user turns are unavailable. Summary-only context is restricted to low-risk approvals.
+- **Persistent user context:** saves admitted user text before compaction and during reviews, separately from model summaries. Summary-only context remains restricted to low-risk approvals.
 - **Approval profiles:** five profiles define which risk and authorization combinations can be allowed.
 - **Unresolved-ask fallback:** independently leaves unresolved asks pending or denies them for unattended workflows, subject to reviewer-availability exceptions.
 - **Bounded review:** limits context, resources, and prompt size. Diagnostics exclude credentials, prompts, resources, custom-policy text, and model rationale.
@@ -25,13 +25,43 @@ The plugin reviews only tool-originated asks. Other permission sources are left 
 
 The plugin uses OpenCode’s structured session message types; it does not search ordinary conversation text for something that merely looks like a summary. A compaction checkpoint is accepted only when it is the latest checkpoint in the supplied context, has `type: "compaction"` and `status: "completed"`, contains a non-empty `summary`, and has a string `recent` field.
 
-- Up to 256 direct user text messages are accepted, within a combined 200,000-character context budget (roughly 50,000 tokens for typical English; actual token counts vary). Exceeding the count or budget makes the context incomplete rather than silently dropping older user intent.
+- User messages up to 16,000 characters (including 5k messages) are kept intact. Longer messages retain a head-and-tail excerpt marked incomplete. Up to 256 direct user text messages are supplied within a combined 200,000-character context budget. Exceeding the count or budget makes the context incomplete rather than silently dropping older user intent.
 - The latest completed checkpoint contributes its `summary` and `recent` fields. If it is the only available context, the reviewer cannot infer high authorization, and the code permits only low-risk approvals in every profile.
 - Assistant and tool messages are not treated as direct user authorization. A compaction summary is lossy background, not a verbatim user instruction.
 - File attachments and `files` metadata are ignored; neither attachment content nor file metadata is sent to the reviewer. Non-empty `agents` or `skills` metadata makes the context incomplete. Missing, running, failed, or empty checkpoints are not used; oversized context is sent as a bounded excerpt marked incomplete.
 - Permission actions are limited to 128 characters; resources are limited to 128 entries, 16,000 characters per entry, and 256 KiB total UTF-8. The complete generated review prompt is capped at 1 MiB.
 
 The reviewer is still called when context is incomplete. It receives the bounded available text (if any) and an explicit `context_complete: false` marker, so it can assess the permission request without mistaking omitted history for authorization. Its assessment still goes through the configured approval profile and unresolved-request fallback.
+
+### Durable user-message map
+
+Records use OpenCode's durable, plugin-scoped `ctx.storage`, at
+`sessions/user_messages/<sessionID>/<messageID>`. One key per message avoids
+parallel-review read/modify/write races. Records survive compaction, plugin
+reloads, and server restarts; they are not project files or diagnostics.
+Only structured, admitted `type: "user"` text is stored, with its message ID and
+an incompleteness flag. Attachment contents, arbitrary metadata, assistant/tool
+output, and summaries are never saved as direct user authorization. This is
+local persistent prompt data: text pasted into a user message is still text.
+
+Reviews capture visible direct messages, and the compaction hook saves them
+before they leave active context. A failed pre-compaction write blocks that
+compaction rather than silently losing the record. Already-compacted messages
+from before installation cannot be reconstructed. The store retains bounded
+text for every observed message; reviews scan at most 4,096 saved messages and
+mark larger histories incomplete before applying the stricter prompt budgets.
+Stored text is only replayed for a completed checkpoint, not as a substitute
+for unavailable live history or for reverted post-checkpoint prompts.
+Records are retained until removed from plugin storage; session deletion does
+not currently purge this additional map.
+
+File references/attachments are separate structured fields. OpenCode can expand
+them into the main agent's model context, but this reviewer ignores those
+fields entirely (including file data); a literal `@path` in user text stays as
+text. Ordinary pasted text has no reliable typed/pasted provenance field in the
+server user-message schema, so it is not guessed or stripped. Long pasted text
+is subject to the same 16k excerpt limit. None of these changes rewrites the
+main agent's input or changes its attachment behavior.
 
 ## Approval profiles
 
@@ -81,7 +111,12 @@ These are model-facing instructions, not a deterministic permission ACL. Project
 
 ## Install and configure
 
-The plugin declares `@opencode/schema` `~2.0.24` and has been checked against schema version 2.0.24.
+The plugin has no runtime OpenCode-schema or Effect dependency. It uses the
+host plugin context and plain model definitions rather than importing a
+version-specific schema into the host's shared Effect runtime. Schema packages
+are unpinned development-only fixtures. This avoids dependency-version coupling,
+but cannot guarantee compatibility with future breaking changes to OpenCode's
+plugin API or the internal reviewer model.
 
 Install the package dependencies, then add the local plugin directory to OpenCode’s `opencode.json`:
 
@@ -139,4 +174,4 @@ MIT License — Copyright (c) 2026 NeKon69. See [LICENSE](LICENSE). This project
 - `FALLBACK=deny` is not a guarantee of prompt-free unattended operation: reviewer/API unavailability and unusable responses stay `ask` so a person can take over.
 - Compaction summaries are lossy and their provenance is handled through reviewer instructions, not a formal policy engine. The code enforces the summary-only approval cap, but risk and authorization classification still depends on the model’s assessment.
 - OpenCode’s generation API does not pin a specific connection. The plugin rechecks the active connection immediately before generation, but cannot eliminate a connection switch in the final check/use window.
-- The implementation has been checked against OpenCode V2 / schema 2.0.24; compatibility with other host versions is not claimed. Five reviews can run concurrently, and the 30-second review timeout includes time spent waiting in the queue.
+- Five reviews can run concurrently, and the 30-second review timeout includes time spent waiting in the queue. OpenCode's plugin API and internal reviewer availability can change independently of this plugin.

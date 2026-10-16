@@ -140,7 +140,6 @@ test("deny fallback declines unreviewable tool asks but leaves non-tool asks unt
       resources: [],
       source: { type: "other" },
     };
-
     await evaluateHook(unsupportedToolAsk);
     await evaluateHook(nonToolAsk);
 

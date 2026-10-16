@@ -1,5 +1,6 @@
 import { inspectAutoReviewProvider, registerAutoReviewModel } from "./model-registration.js";
 import { isEligibleChatGPTCredential, applyUnreviewedToolFallback, reviewPermission } from "./review.js";
+import { createUserMessageStore } from "./user-messages.js";
 import {
   OPENAI_PROVIDER_ID,
   resolveApprovalMode,
@@ -24,6 +25,20 @@ export default {
     let disposed = false;
     const active = new Set();
     const transforms = [];
+    const userMessages = createUserMessageStore(ctx.storage);
+    if (userMessages && ctx.session?.hook) {
+      transforms.push(await ctx.session.hook("compaction", async (event) => {
+        try {
+          // Read admitted user records, not lowered model messages (which may
+          // include attachment contents, synthetic text, and tool output).
+          const messages = await ctx.session.context({ sessionID: event.sessionID });
+          await userMessages.capture(event.sessionID, messages);
+        } catch (error) {
+          log("user-messages.capture.failed", { errorName: safeErrorName(error) });
+          throw new Error("Could not persist user messages before compaction");
+        }
+      }));
+    }
 
     log("plugin.setup.started", { approvalMode, decisionFallback });
     let permissionRegistration;
@@ -33,6 +48,7 @@ export default {
       permissionRegistration = await ctx.permission.hook("evaluate", async (event) => {
         const reviewID = createReviewID();
         const hookStartedAt = performance.now();
+
         const eligible = shouldReviewPermission(event);
         log("permission-hook.received", {
           reviewID,
@@ -65,6 +81,7 @@ export default {
             reviewID,
             startedAt: hookStartedAt,
             log,
+            userMessages,
           });
         } finally {
           active.delete(controller);

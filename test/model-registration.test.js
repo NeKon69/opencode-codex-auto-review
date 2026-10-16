@@ -1,8 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { registerAutoReviewModel } from "../src/model-registration.js";
+import { createAutoReviewModel, registerAutoReviewModel } from "../src/model-registration.js";
 
 const CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
+
+test("host model templates retain unknown host fields but not model-specific request settings", () => {
+  const template = {
+    id: "native", modelID: "native", providerID: "openai", hostField: { versionIndependent: true },
+    settings: { reasoningEffort: "max" }, headers: { "test-header": "value" }, body: { model: "native" },
+    variants: [{ id: "variant" }], limit: { context: 128_000, output: 32_000 },
+  };
+  const original = structuredClone(template);
+  const model = createAutoReviewModel(template);
+  assert.deepEqual(template, original);
+  assert.deepEqual(model.hostField, template.hostField);
+  assert.equal(model.modelID, "codex-auto-review");
+  assert.equal(model.limit.context, 128_000);
+  assert.equal(model.limit.output, 2_048);
+  assert.equal(model.settings, undefined);
+  assert.equal(model.headers, undefined);
+  assert.equal(model.body, undefined);
+  assert.deepEqual(model.variants, []);
+});
 
 const providerInfo = () => ({
   id: "openai",

@@ -104,6 +104,7 @@ const SAFE_STRING_VALUES = {
     "review.queue.acquire",
     "reviewer.generate",
     "session.context",
+    "session.user-messages",
   ]),
   contextFailureCode: new Set([
     "context_budget_exceeded",

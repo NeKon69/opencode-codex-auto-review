@@ -1,4 +1,3 @@
-import { Info as ModelInfo } from "@opencode/schema/model";
 import { AUTO_REVIEW_MODEL, OPENAI_PROVIDER_ID } from "./review-protocol.js";
 
 const CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
@@ -22,8 +21,23 @@ export function inspectAutoReviewProvider(editor) {
 }
 
 /** Construct a text-only model definition for the hidden Codex reviewer. */
-export function createAutoReviewModel() {
-  const model = ModelInfo.default(OPENAI_PROVIDER_ID, AUTO_REVIEW_MODEL);
+export function createAutoReviewModel(template) {
+  // Avoid importing host schemas/Effect at runtime: the host can share a newer
+  // Effect namespace with plugins than their npm dependencies expect.
+  const model = template ? structuredClone(template) : {
+    variants: [], time: { released: 0 }, cost: [],
+    limit: { context: 200_000, output: REVIEWER_OUTPUT_LIMIT },
+  };
+  model.id = AUTO_REVIEW_MODEL;
+  model.modelID = AUTO_REVIEW_MODEL;
+  model.providerID = OPENAI_PROVIDER_ID;
+  // Do not inherit another model's request overlays or variants.
+  delete model.settings;
+  delete model.headers;
+  delete model.body;
+  model.variants = [];
+  model.cost = [];
+  model.time = { released: 0 };
   model.name = "Codex Auto Review";
   model.capabilities = { tools: false, input: ["text"], output: ["text"] };
   model.enabled = true;
@@ -52,6 +66,6 @@ export function registerAutoReviewModel(editor) {
     return true;
   }
 
-  editor.models.set(OPENAI_PROVIDER_ID, [...record.models.values(), createAutoReviewModel()]);
+  editor.models.set(OPENAI_PROVIDER_ID, [...record.models.values(), createAutoReviewModel(record.models.values().next().value)]);
   return true;
 }

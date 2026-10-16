@@ -1,4 +1,5 @@
 import { MAX_CUSTOM_INSTRUCTION_CHARS, MAX_CUSTOM_INSTRUCTION_SOURCE_CHARS } from "./custom-instructions.js";
+import { boundUserText, MAX_USER_MESSAGE_CHARS } from "./user-messages.js";
 
 export { MAX_CUSTOM_INSTRUCTION_CHARS, MAX_CUSTOM_INSTRUCTION_SOURCE_CHARS };
 
@@ -97,6 +98,7 @@ export function extractUserContext(messages, maxChars = MAX_CONTEXT_CHARS) {
   const found = [];
   let unsupported = false;
   let compacted = false;
+  let originalTextChars = 0;
   let latestCompaction;
   for (const message of messages) {
     if (!isRecord(message)) {
@@ -119,7 +121,9 @@ export function extractUserContext(messages, maxChars = MAX_CONTEXT_CHARS) {
       unsupported = true;
       continue;
     }
-    found.push(message.text.trim());
+    originalTextChars += message.text.length;
+    if (message.incomplete === true || message.text.length > MAX_USER_MESSAGE_CHARS) unsupported = true;
+    found.push(boundUserText(message.text.trim()));
   }
 
   let compactionSummary;
@@ -145,8 +149,8 @@ export function extractUserContext(messages, maxChars = MAX_CONTEXT_CHARS) {
   const compactionTextChars = usableCompactionSummary
     ? usableCompactionSummary.summary.length + usableCompactionSummary.recent.length
     : 0;
-  const overBudget = directTextChars + compactionTextChars > safeMaxChars;
-  if (overBudget) {
+  const overBudget = originalTextChars + compactionTextChars > safeMaxChars;
+  if (directTextChars + compactionTextChars > safeMaxChars) {
     if (directTextChars > safeMaxChars) {
       selected = takeRecentMessages(selected, safeMaxChars);
       usableCompactionSummary = undefined;

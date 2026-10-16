@@ -138,7 +138,20 @@ export async function reviewPermission(ctx, event, options = {}) {
         controller.signal,
       )),
     ]);
-    const session = sessionResult.value;
+    let session = sessionResult.value;
+    let historyIncomplete = false;
+    if (options.userMessages) {
+      try {
+        const restored = await runPhase("session.user-messages", () => raceWithAbort(
+          options.userMessages.restore(event.sessionID, session), controller.signal,
+        ));
+        session = restored.messages;
+        historyIncomplete = restored.incomplete;
+      } catch {
+        // Storage errors must not turn omitted history into authorization.
+        historyIncomplete = true;
+      }
+    }
     log("session.context.summary", {
       reviewID,
       ...summarizeSessionContext(session),
@@ -146,6 +159,7 @@ export async function reviewPermission(ctx, event, options = {}) {
     log("integration.connection.summary", { reviewID, connectionAvailable: Boolean(connection) });
 
     const authorization = await runPhase("context.validation", () => extractUserContext(session));
+    if (historyIncomplete) authorization.truncated = true;
     log("context.validation.summary", {
       reviewID,
       acceptedUserMessageCount: authorization.messages.length,
